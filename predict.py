@@ -60,7 +60,7 @@ def load_model(model_path: str):
 # ─── Single-frame inference ───────────────────────────────────────────────────
 
 def predict_frame(img_bgr: np.ndarray, pose_model, clf, feature_cols: list,
-                  conf_threshold: float = 0.30):
+                  conf_threshold: float = 0.30, good_threshold: float = 0.40):
     """
     Returns:
       label      : "good" | "bad" | "no_detection"
@@ -95,9 +95,13 @@ def predict_frame(img_bgr: np.ndarray, pose_model, clf, feature_cols: list,
     X = row.reindex(columns=feature_cols)
 
     prob = clf.predict_proba(X)[0]              # [p_bad, p_good]
-    pred_int  = int(clf.predict(X)[0])
-    label     = "good" if pred_int == 1 else "bad"
-    confidence = float(prob[pred_int])
+    p_good     = float(prob[1])
+    label      = "good" if p_good >= good_threshold else "bad"
+    confidence = p_good if label == "good" else float(prob[0])
+
+    # Skip low-confidence predictions — return empty so frame is left blank
+    if confidence < 0.40:
+        return "no_detection", 0.0, [], {}
 
     # Generate improvement feedback
     from train import generate_feedback
@@ -120,6 +124,9 @@ SKELETON_PAIRS = [
 
 def draw_overlay(img: np.ndarray, label: str, confidence: float,
                  feedback: list, kp_data: dict) -> np.ndarray:
+    if label == "no_detection":
+        return img.copy()
+
     out = img.copy()
     h, w = out.shape[:2]
 
@@ -168,13 +175,16 @@ def draw_overlay(img: np.ndarray, label: str, confidence: float,
 
 # ─── Modes ────────────────────────────────────────────────────────────────────
 
-def run_image(path: str, pose_model, clf, feature_cols, save_dir: str):
+def run_image(path: str, pose_model, clf, feature_cols, save_dir: str,
+              good_threshold: float = 0.40):
     img = cv2.imread(path)
     if img is None:
         print(f"  Cannot read: {path}")
         return
 
-    label, conf, feedback, kp_data = predict_frame(img, pose_model, clf, feature_cols)
+    label, conf, feedback, kp_data = predict_frame(
+        img, pose_model, clf, feature_cols, good_threshold=good_threshold
+    )
     vis = draw_overlay(img, label, conf, feedback, kp_data)
 
     out_name = Path(path).stem + "_predicted.jpg"
@@ -190,17 +200,19 @@ def run_image(path: str, pose_model, clf, feature_cols, save_dir: str):
         print()
 
 
-def run_folder(folder: str, pose_model, clf, feature_cols):
+def run_folder(folder: str, pose_model, clf, feature_cols,
+               good_threshold: float = 0.40):
     exts    = {".jpg", ".jpeg", ".png", ".bmp"}
     images  = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in exts)
     out_dir = os.path.join(folder, "predictions")
     os.makedirs(out_dir, exist_ok=True)
     print(f"Processing {len(images)} images in {folder}  →  {out_dir}")
     for img_path in images:
-        run_image(str(img_path), pose_model, clf, feature_cols, out_dir)
+        run_image(str(img_path), pose_model, clf, feature_cols, out_dir, good_threshold)
 
 
-def run_video(video_path: str, pose_model, clf, feature_cols, every_n: int = 1):
+def run_video(video_path: str, pose_model, clf, feature_cols, every_n: int = 3,
+              good_threshold: float = 0.40):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Cannot open video: {video_path}")
@@ -231,7 +243,7 @@ def run_video(video_path: str, pose_model, clf, feature_cols, every_n: int = 1):
 
         if frame_idx % every_n == 0:
             last_label, last_conf, last_fb, last_kp = predict_frame(
-                frame, pose_model, clf, feature_cols
+                frame, pose_model, clf, feature_cols, good_threshold=good_threshold
             )
 
         vis = draw_overlay(frame, last_label, last_conf, last_fb, last_kp)
@@ -243,13 +255,14 @@ def run_video(video_path: str, pose_model, clf, feature_cols, every_n: int = 1):
     print(f"Saved → {out_path}")
 
 
-def run_webcam(pose_model, clf, feature_cols, camera_idx: int = 0):
+def run_webcam(pose_model, clf, feature_cols, camera_idx: int = 0,
+               good_threshold: float = 0.40):
     cap = cv2.VideoCapture(camera_idx)
     if not cap.isOpened():
         print(f"Cannot open camera {camera_idx}")
         return
 
-    print("Live webcam — press  Q  to quit,  S  to save screenshot")
+    print(f"Live webcam — threshold={good_threshold}  |  Q=quit  S=save screenshot")
     frame_n   = 0
     last_pred = ("no_detection", 0.0, [], {})
 
@@ -258,9 +271,10 @@ def run_webcam(pose_model, clf, feature_cols, camera_idx: int = 0):
         if not ret:
             break
 
-        # Run inference every 3rd frame for smooth display
         if frame_n % 3 == 0:
-            last_pred = predict_frame(frame, pose_model, clf, feature_cols)
+            last_pred = predict_frame(
+                frame, pose_model, clf, feature_cols, good_threshold=good_threshold
+            )
 
         vis = draw_overlay(frame, *last_pred[:3], last_pred[3])
         cv2.imshow("Push-up Form Checker  (Q=quit  S=save)", vis)
@@ -291,6 +305,8 @@ def main():
                         help="For video: process every Nth frame (default 3)")
     parser.add_argument("--save-dir", default="predictions",
                         help="Output folder for single-image predictions")
+    parser.add_argument("--threshold", type=float, default=0.40,
+                        help="Min P(good) to call GOOD (default 0.40, lower=more lenient, higher=stricter)")
     args = parser.parse_args()
 
     if not args.webcam and not args.input:
@@ -302,18 +318,19 @@ def main():
     print(f"Loading pose model '{args.pose}' …")
     pose_model = YOLO(args.pose)
 
+    t = args.threshold
     if args.webcam:
-        run_webcam(pose_model, clf, feature_cols)
+        run_webcam(pose_model, clf, feature_cols, good_threshold=t)
 
     elif os.path.isdir(args.input):
-        run_folder(args.input, pose_model, clf, feature_cols)
+        run_folder(args.input, pose_model, clf, feature_cols, good_threshold=t)
 
     elif args.input.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
-        run_video(args.input, pose_model, clf, feature_cols, every_n=args.every)
+        run_video(args.input, pose_model, clf, feature_cols, every_n=args.every, good_threshold=t)
 
     else:
         os.makedirs(args.save_dir, exist_ok=True)
-        run_image(args.input, pose_model, clf, feature_cols, args.save_dir)
+        run_image(args.input, pose_model, clf, feature_cols, args.save_dir, good_threshold=t)
 
 
 if __name__ == "__main__":
