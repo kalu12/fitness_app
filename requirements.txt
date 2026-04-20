@@ -1,0 +1,9 @@
+# ── System package (run once) ─────────────────────────────────────────────────
+# sudo apt install python3-tk          ← required for the annotator GUI (Ubuntu/Debian)
+
+# ── Python packages ───────────────────────────────────────────────────────────
+ultralytics>=8.0.0        # YOLOv8 pose estimation (auto-downloads weights)
+opencv-python>=4.8.0      # Video decoding & frame extraction
+Pillow>=10.0.0            # Image display in Tkinter canvas
+numpy>=1.24.0
+pandas>=2.0.0             # CSV dataset export
