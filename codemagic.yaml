@@ -1,0 +1,39 @@
+workflows:
+  ios-development:
+    name: iOS – Device build
+    max_build_duration: 60
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: development   # installs directly on your device
+        bundle_identifier: com.fitnessapp.fitnessApp
+
+    scripts:
+      - name: Set Flutter version
+        script: flutter --version
+
+      - name: Get packages
+        script: |
+          cd flutter_app
+          flutter pub get
+
+      - name: Build iOS IPA
+        script: |
+          cd flutter_app
+          flutter build ipa \
+            --release \
+            --export-options-plist=$CM_EXPORT_OPTIONS_PLIST
+
+    artifacts:
+      - flutter_app/build/ios/ipa/*.ipa
+
+    publishing:
+      email:
+        recipients:
+          - emilmirza99@gmail.com
+        notify:
+          success: true
+          failure: true
